@@ -1,0 +1,14 @@
+[package]
+name = "bastard-minesweeper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
+eframe = "0.31.1"
+egui_extras = "0.31.1"
+itertools = "0.14.0"
+llist = "0.7.3"
+ndarray = "0.16.1"
+rand = "0.9.1"
+rayon = "1.10.0"
