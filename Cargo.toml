@@ -7,6 +7,7 @@ edition = "2024"
 clap = { version = "4.5.38", features = ["derive"] }
 eframe = "0.31.1"
 egui_extras = "0.31.1"
+indicatif = "0.17.11"
 itertools = "0.14.0"
 llist = "0.7.3"
 ndarray = "0.16.1"

@@ -1,16 +1,16 @@
+#![warn(clippy::pedantic)]
+
 use std::{
     collections::HashMap,
-    mem::take,
-    ops::{Deref, DerefMut, Index, IndexMut, RangeInclusive},
+    ops::{Deref, DerefMut, RangeInclusive, Rem},
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
-use llist::{ConsRef, LList};
-use ndarray::{Array2, ArrayView2, ArrayViewMut2};
-use rand::{Rng, distr::slice::Choose, rng, seq::SliceRandom};
-use rayon::prelude::*;
+use ndarray::Array2;
+use rand::{Rng, distr::slice::Choose, rng};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Cell {
@@ -26,14 +26,16 @@ impl Default for Cell {
 }
 
 impl Cell {
+    #[must_use]
     pub fn bomb_count(&self) -> RangeInclusive<u8> {
         match self {
             Cell::Quantum(None) => 0..=1,
-            Cell::Quantum(Some(b)) | Cell::Concrete(b) => (*b as u8)..=(*b as u8),
+            Cell::Quantum(Some(b)) | Cell::Concrete(b) => u8::from(*b)..=u8::from(*b),
             Cell::Discovered(_) => 0..=0,
         }
     }
 
+    #[must_use]
     pub fn is_bomb(&self) -> bool {
         match self {
             Cell::Quantum(Some(b)) | Cell::Concrete(b) => *b,
@@ -61,6 +63,7 @@ impl DerefMut for Board {
 }
 
 impl Board {
+    #[must_use]
     pub fn new(w: usize, h: usize) -> Self {
         Self(Array2::default((w, h)))
     }
@@ -79,8 +82,9 @@ impl Board {
             .filter_map(|(x, y)| Some((x, y, self.get((x, y))?)))
     }
     /// Check whether assigning a particular value to a cell would violate any existing discovered cells
+    #[must_use]
     pub fn assignment_is_legal(&self, x: usize, y: usize, value: bool) -> bool {
-        let new_value = value as u8;
+        let new_value = u8::from(value);
         let current_value = self[(x, y)].bomb_count();
         self.neighbors(x, y)
             .filter_map(|(x, y, c)| {
@@ -98,6 +102,7 @@ impl Board {
             })
     }
     /// Count the number of bombs neighboring a cell
+    #[must_use]
     pub fn count_neighboring_bombs(&self, x: usize, y: usize) -> RangeInclusive<u8> {
         self.neighbors(x, y)
             .map(|(_, _, c)| c.bomb_count())
@@ -119,6 +124,7 @@ impl Board {
         }
     }
     /// Find the values for all discovered cells
+    #[must_use]
     pub fn find_discovered_counts(&self) -> Vec<((usize, usize), u8)> {
         let (width, height) = self.dim();
         (0..width)
@@ -148,23 +154,38 @@ impl Board {
             })
             .collect_vec()
             .into_iter()
-            .for_each(|(c, v)| self[c] = Cell::Discovered(Some(v)));
+            .for_each(|(c, v)| {
+                if let Cell::Discovered(Some(r)) = self[c] {
+                    debug_assert_eq!(v, r);
+                }
+                self[c] = Cell::Discovered(Some(v));
+            });
     }
     /// Collapse all quantum cells
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
     pub fn collapse(&mut self, mut max_bombs: usize) {
         eprintln!("Collapsing...");
         let (width, height) = self.dim();
-        let mut validity_board = self.clone();
-        validity_board.iter_mut().for_each(|c| {
-            if matches!(c, Cell::Quantum(Some(_))) {
-                *c = Cell::Quantum(None)
-            }
-        });
-        let quantum_cells = (0..width)
+        let mut quantum_cells = (0..width)
             .cartesian_product(0..height)
-            .filter(|(x, y)| match self[(*x, *y)] {
-                Cell::Quantum(Some(b)) => {
-                    if validity_board.assignment_is_legal(*x, *y, !b) {
+            .filter(|(x, y)| {
+                matches!(self[(*x, *y)], Cell::Quantum(_))
+                    && self
+                        .neighbors(*x, *y)
+                        .any(|(_, _, n)| matches!(n, Cell::Discovered(_)))
+            })
+            .collect_vec();
+        {
+            let mut true_check_board = self.clone();
+            true_check_board.iter_mut().for_each(|c| {
+                if matches!(c, Cell::Quantum(Some(false))) {
+                    *c = Cell::Quantum(None);
+                }
+            });
+            quantum_cells.retain(|(x, y)| match self[(*x, *y)] {
+                Cell::Quantum(Some(true)) => {
+                    if true_check_board.assignment_is_legal(*x, *y, false) {
+                        self[(*x, *y)] = Cell::Quantum(None);
                         true
                     } else {
                         max_bombs -= 1;
@@ -173,23 +194,59 @@ impl Board {
                 }
                 Cell::Quantum(_) => true,
                 _ => false,
-            })
-            .filter(|(x, y)| {
-                self.neighbors(*x, *y)
-                    .any(|(_, _, n)| matches!(n, Cell::Discovered(_)))
-            })
-            .collect_vec();
+            });
+            let mut false_check_board = self.clone();
+            false_check_board.iter_mut().for_each(|c| {
+                if matches!(c, Cell::Quantum(Some(true))) {
+                    *c = Cell::Quantum(None);
+                }
+            });
+            quantum_cells.retain(|(x, y)| match self[(*x, *y)] {
+                Cell::Quantum(Some(false)) => {
+                    if false_check_board.assignment_is_legal(*x, *y, true) {
+                        self[(*x, *y)] = Cell::Quantum(None);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Cell::Quantum(_) => true,
+                _ => false,
+            });
+        }
+        if max_bombs == 0 {
+            quantum_cells
+                .iter()
+                .for_each(|c| self[*c] = Cell::Quantum(Some(false)));
+            eprintln!("run out of bombs");
+            return;
+        }
+        if quantum_cells.is_empty() {
+            eprintln!("can't assign any cells");
+            return;
+        }
+        let mut rng = rng();
+        quantum_cells.sort_by_key(|(x, y)| x + y);
         quantum_cells
             .iter()
             .for_each(|c| self[*c] = Cell::Quantum(None));
         eprintln!("{} quantum cells", quantum_cells.len());
-        let mut states = self
+        let progress = ProgressBar::no_length().with_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner} {per_sec}")
+                .unwrap(),
+        );
+        progress.enable_steady_tick(Duration::from_millis(100));
+        let began = Instant::now();
+        let states = self
+            .clone()
             .collapse_inner(Arc::new(Cons::Empty), 0, &quantum_cells, max_bombs)
             .into_iter()
             .flatten()
+            .progress_with(progress)
             .map(|s| {
                 let mut s = &s;
-                std::iter::from_fn(move || {
+                let mut v = std::iter::from_fn(move || {
                     if let Cons::Cell(b, next) = &**s {
                         s = next;
                         Some(*b)
@@ -197,20 +254,22 @@ impl Board {
                         None
                     }
                 })
-                .collect_vec()
-                .into_iter()
-                .rev()
-                .collect_vec()
+                .collect_vec();
+                v.reverse();
+                v
             })
             .collect_vec();
-        eprintln!("{} possible states", states.len());
+        eprintln!(
+            "{} possible states in {}s",
+            states.len(),
+            began.elapsed().as_secs_f32()
+        );
         if !states.is_empty() {
-            let mut rng = rng();
             let began = Instant::now();
             let state_counts = (&mut rng)
                 .sample_iter(Choose::new(states.as_slice()).unwrap())
                 .take(states.len())
-                .take_while(|_| began.elapsed() < Duration::from_secs(5))
+                .take_while(|_| began.elapsed() < Duration::from_secs(2))
                 .map(|s| {
                     s.iter()
                         .zip(&quantum_cells)
@@ -222,10 +281,13 @@ impl Board {
                     acc.entry(numbers).or_insert((0usize, quanta)).0 += 1;
                     acc
                 });
-            eprintln!("{} unique sets of numbers", state_counts.len());
-            if let Some((best_state, (_, quanta))) =
-                state_counts.iter().max_by_key(|(_, count)| **count)
-            {
+            eprintln!(
+                "{} unique sets found in {}s of sampling",
+                state_counts.len(),
+                began.elapsed().as_secs_f32()
+            );
+            if let Some((_, (amt, quanta))) = state_counts.iter().max_by_key(|(_, count)| **count) {
+                eprintln!("Chose a state with {amt} possible bomb placements");
                 // best_state
                 //     .iter()
                 //     .for_each(|(c, v)| self[*c] = Cell::Discovered(Some(*v)));
@@ -233,32 +295,33 @@ impl Board {
                     .iter()
                     .zip(quanta.iter())
                     .for_each(|(c, v)| self[*c] = Cell::Quantum(Some(*v)));
-            };
+            }
         }
     }
-    fn collapse_inner<'a, 'b: 'a>(
-        &mut self,
+    fn collapse_inner<'a>(
+        self,
         list: Arc<Cons<bool>>,
         depth: usize,
-        cells: &[(usize, usize)],
+        cells: &'a [(usize, usize)],
         max_bombs: usize,
-    ) -> Option<Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send + 'b>> {
+    ) -> Option<Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send + 'a>> {
         let [(x, y), rest @ ..] = cells else {
             if matches!(*list, Cons::Cell(_, _)) {
                 return Some(Box::new(std::iter::once(list)));
-            } else {
-                return None;
             }
+            return None;
         };
-        let left_is_legal = max_bombs > 0 && self.assignment_is_legal(*x, *y, true);
-        let right_is_legal = self.assignment_is_legal(*x, *y, false);
-        let depth_increase = (left_is_legal && right_is_legal) as usize;
+        let x = *x;
+        let y = *y;
+        let left_is_legal = max_bombs > 0 && self.assignment_is_legal(x, y, true);
+        let right_is_legal = self.assignment_is_legal(x, y, false);
+        let depth_increase = usize::from(left_is_legal && right_is_legal);
         let left = {
             let list = list.clone();
             let mut board = self.clone();
             move || {
                 if left_is_legal {
-                    board[(*x, *y)] = Cell::Quantum(Some(true));
+                    board[(x, y)] = Cell::Quantum(Some(true));
                     board
                         .collapse_inner(
                             Arc::new(Cons::Cell(true, list)),
@@ -266,9 +329,7 @@ impl Board {
                             rest,
                             max_bombs - 1,
                         )
-                        .map(|i| {
-                            Box::new(i) as Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send + 'b>
-                        })
+                        .map(|i| Box::new(i) as Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send>)
                 } else {
                     None
                 }
@@ -279,7 +340,7 @@ impl Board {
             let mut board = self.clone();
             move || {
                 if right_is_legal {
-                    board[(*x, *y)] = Cell::Quantum(Some(false));
+                    board[(x, y)] = Cell::Quantum(Some(false));
                     board
                         .collapse_inner(
                             Arc::new(Cons::Cell(false, list)),
@@ -287,25 +348,40 @@ impl Board {
                             rest,
                             max_bombs,
                         )
-                        .map(|i| {
-                            Box::new(i) as Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send + 'b>
-                        })
+                        .map(|i| Box::new(i) as Box<dyn Iterator<Item = Arc<Cons<bool>>> + Send>)
                 } else {
                     None
                 }
             }
         };
-        let (left, right) = if depth < 5 {
-            rayon::join(left, right)
-        } else {
-            (left(), right())
-        };
 
-        match (left, right) {
-            (Some(left), Some(right)) => Some(Box::new(left.chain(right))),
-            (Some(one), None) | (None, Some(one)) => Some(one),
-            (None, None) => None,
+        match (left_is_legal, right_is_legal) {
+            (true, true) => {
+                if depth.rem(18) == 6 {
+                    let (left, right) = rayon::join(left, right);
+                    Some(Box::new(left.into_iter().chain(right).flatten()))
+                } else {
+                    Some(Box::new(
+                        [
+                            Box::new(left) as Box<dyn FnOnce() -> _ + Send>,
+                            Box::new(right) as Box<dyn FnOnce() -> _ + Send>,
+                        ]
+                        .into_iter()
+                        .filter_map(|i| i())
+                        .flatten(),
+                    ))
+                }
+            }
+            (true, false) => left(),
+            (false, true) => right(),
+            (false, false) => None,
         }
+
+        // match (left, right) {
+        //     (Some(left), Some(right)) => Some(Box::new(left.chain(right))),
+        //     (Some(one), None) | (None, Some(one)) => Some(one),
+        //     (None, None) => None,
+        // }
     }
 }
 

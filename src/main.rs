@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 use std::{collections::HashSet, thread::JoinHandle};
 
 use bastard_minesweeper::{Board, Cell};
@@ -8,13 +10,16 @@ use eframe::{
 };
 use egui_extras::{Column, TableBuilder};
 use itertools::Itertools;
-use rand::{Rng, rng, thread_rng};
+use rand::{Rng, rng};
 
 #[derive(Parser)]
 struct Args {
+    #[arg(short, long, default_value = "10")]
     pub width: usize,
+    #[arg(short, long, default_value = "10")]
     pub height: usize,
     /// Maximum bombs
+    #[arg(short, long, default_value = "10")]
     pub max_bombs: usize,
     /// Bastard mode: Use quantum cells to make the game as annoying as possible
     #[arg(short, long)]
@@ -31,7 +36,7 @@ fn main() {
 
     let mut board = Board::new(width, height);
 
-    if !bastard {
+    if !(bastard) {
         let mut rng = rng();
         let mut bombs_to_place = max_bombs;
         for (x, y) in (0..width).cartesian_product(0..height) {
@@ -71,6 +76,7 @@ fn main() {
     .unwrap();
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct App {
     pub board: Board,
     pub worker: Option<JoinHandle<Board>>,
@@ -84,7 +90,16 @@ struct App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+    #[allow(clippy::too_many_lines)]
+    fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        if self.board.iter().all(|c| {
+            matches!(
+                c,
+                Cell::Quantum(Some(true)) | Cell::Discovered(_) | Cell::Concrete(true)
+            )
+        }) {
+            self.win = true;
+        }
         // Join worker if we have one
         if let Some(worker) = std::mem::take(&mut self.worker) {
             if worker.is_finished() {
@@ -128,7 +143,7 @@ impl eframe::App for App {
                         new_board.fill_discovered();
                     }
                     new_board
-                }))
+                }));
             }
         }
         TopBottomPanel::top("status").show(ctx, |ui| {
@@ -140,7 +155,14 @@ impl eframe::App for App {
                     ui.label("Idle");
                 }
                 ui.separator();
-                ui.checkbox(&mut self.cheat, "Cheat")
+                ui.checkbox(&mut self.cheat, "Cheat");
+                if self.lose.is_some() {
+                    ui.separator();
+                    ui.label("You lose!");
+                } else if self.win {
+                    ui.separator();
+                    ui.label("You win!");
+                }
             });
         });
         CentralPanel::default().show(ctx, |ui| {
@@ -156,10 +178,9 @@ impl eframe::App for App {
                                 Cell::Discovered(Some(n)) => {
                                     ui.label(n.to_string());
                                 }
-                                Cell::Discovered(None) => {
-                                    ui.label("?");
-                                }
-                                Cell::Quantum(_) | Cell::Concrete(_) => {
+                                Cell::Quantum(_) | Cell::Concrete(_)
+                                    if self.lose.is_none() && !self.win =>
+                                {
                                     if self.flags.contains(&(x, y)) {
                                         if ui.button("F").secondary_clicked() {
                                             self.flags.remove(&(x, y));
@@ -221,10 +242,20 @@ impl eframe::App for App {
                                         }
                                     }
                                 }
+                                Cell::Quantum(Some(b)) | Cell::Concrete(b) => {
+                                    ui.label(if b {
+                                        if self.lose == Some((x, y)) { "B" } else { "b" }
+                                    } else {
+                                        " "
+                                    });
+                                }
+                                _ => {
+                                    ui.label("?");
+                                }
                             });
                         }
                     });
-                })
+                });
         });
     }
 }
