@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    ops::{Deref, DerefMut, RangeInclusive, Rem},
+    ops::{Deref, DerefMut, Range, RangeInclusive, Rem},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -163,9 +163,10 @@ impl Board {
     }
     /// Collapse all quantum cells
     #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
-    pub fn collapse(&mut self, mut max_bombs: usize) {
+    pub fn collapse(&mut self, mut max_bombs: usize, allowed_range: Option<Range<(usize, usize)>>) {
         eprintln!("Collapsing...");
         let (width, height) = self.dim();
+        let allowed_range = allowed_range.unwrap_or((0, 0)..(width, height));
         let mut quantum_cells = (0..width)
             .cartesian_product(0..height)
             .filter(|(x, y)| {
@@ -183,15 +184,7 @@ impl Board {
                 }
             });
             quantum_cells.retain(|(x, y)| match self[(*x, *y)] {
-                Cell::Quantum(Some(true)) => {
-                    if true_check_board.assignment_is_legal(*x, *y, false) {
-                        self[(*x, *y)] = Cell::Quantum(None);
-                        true
-                    } else {
-                        max_bombs -= 1;
-                        false
-                    }
-                }
+                Cell::Quantum(Some(true)) => true_check_board.assignment_is_legal(*x, *y, false),
                 Cell::Quantum(_) => true,
                 _ => false,
             });
@@ -202,18 +195,27 @@ impl Board {
                 }
             });
             quantum_cells.retain(|(x, y)| match self[(*x, *y)] {
-                Cell::Quantum(Some(false)) => {
-                    if false_check_board.assignment_is_legal(*x, *y, true) {
-                        self[(*x, *y)] = Cell::Quantum(None);
-                        true
-                    } else {
-                        false
-                    }
-                }
+                Cell::Quantum(Some(false)) => false_check_board.assignment_is_legal(*x, *y, true),
                 Cell::Quantum(_) => true,
                 _ => false,
             });
+
+            quantum_cells.retain(|(x, y)| {
+                (allowed_range.start.0..allowed_range.end.0).contains(x)
+                    && (allowed_range.start.1..allowed_range.end.1).contains(y)
+            });
         }
+
+        quantum_cells
+            .iter()
+            .for_each(|p| self[*p] = Cell::Quantum(None));
+
+        max_bombs = max_bombs.saturating_sub(
+            self.iter()
+                .filter(|c| matches!(c, Cell::Concrete(true) | Cell::Quantum(Some(true))))
+                .count(),
+        );
+
         if max_bombs == 0 {
             quantum_cells
                 .iter()
@@ -230,7 +232,10 @@ impl Board {
         quantum_cells
             .iter()
             .for_each(|c| self[*c] = Cell::Quantum(None));
-        eprintln!("{} quantum cells", quantum_cells.len());
+        eprintln!(
+            "{} quantum cells, {max_bombs} bombs to place",
+            quantum_cells.len()
+        );
         let progress = ProgressBar::no_length().with_style(
             ProgressStyle::default_spinner()
                 .template("{spinner} {per_sec}")

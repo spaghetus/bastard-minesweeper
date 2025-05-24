@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 
-use std::{collections::HashSet, thread::JoinHandle};
+use std::{collections::HashSet, thread::JoinHandle, usize};
 
 use bastard_minesweeper::{Board, Cell};
 use clap::Parser;
@@ -124,6 +124,16 @@ impl eframe::App for App {
                 })
                 .collect::<HashSet<_>>();
             if !clearable_cells.is_empty() {
+                let allowed_range =
+                    clearable_cells
+                        .iter()
+                        .fold((usize::MAX, usize::MAX)..(0, 0), |acc, el| {
+                            (
+                                acc.start.0.min(el.0.saturating_sub(2)),
+                                acc.start.1.min(el.1.saturating_sub(2)),
+                            )
+                                ..(acc.end.0.max(el.0 + 3), acc.end.1.max(el.1 + 3))
+                        });
                 for (x, y) in clearable_cells {
                     self.board.clear_cell(x, y);
                 }
@@ -136,7 +146,7 @@ impl eframe::App for App {
                             .iter()
                             .any(|c| matches!(c, Cell::Discovered(None)))
                         {
-                            new_board.collapse(max_bombs);
+                            new_board.collapse(max_bombs, Some(allowed_range.clone()));
                             new_board.fill_discovered();
                         }
                     } else {
@@ -227,7 +237,16 @@ impl eframe::App for App {
                                                     while new_board.iter().any(|c| {
                                                         matches!(c, Cell::Discovered(None))
                                                     }) {
-                                                        new_board.collapse(max_bombs);
+                                                        new_board.collapse(
+                                                            max_bombs,
+                                                            Some(
+                                                                (
+                                                                    x.saturating_sub(5),
+                                                                    y.saturating_sub(5),
+                                                                )
+                                                                    ..(x + 5, y + 5),
+                                                            ),
+                                                        );
                                                         new_board.fill_discovered();
                                                     }
                                                 } else {
