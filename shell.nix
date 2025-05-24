@@ -1,6 +1,6 @@
 {pkgs ? import <nixpkgs> {}}:
 with pkgs; let
-  libPath = lib.makeLibraryPath [
+  deps = [
     libGL
     libxkbcommon
     wayland
@@ -8,11 +8,10 @@ with pkgs; let
     xorg.libXcursor
     xorg.libXi
     xorg.libXrandr
+    llvmPackages_12.bintools
   ];
 in
   mkShell {
-    buildInputs = [
-      xorg.libxcb
-    ];
-    LD_LIBRARY_PATH = libPath;
+    buildInputs = deps;
+    LD_LIBRARY_PATH = lib.makeLibraryPath deps;
   }
